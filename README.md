@@ -1,6 +1,6 @@
 # RSE AI Agent
 
-**A private, local AI business-analyst agent for a financial-planning practice.**
+**Agentic RAG for private, local AI business-analyst agent for a financial-planning practice.**
 
 Ask questions in plain English and get grounded answers, charts and Excel reports. The agent works over three sources:
 - your **client workbook** (text-to-SQL)
