@@ -1,0 +1,38 @@
+# --- PRIVACY: client data must never be committed ---
+# Real client files live OUTSIDE this repo (e.g. D:\PlannerIQ_private\).
+# Only generated synthetic demo data in data/synthetic/ may be committed.
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+*.duckdb
+*.duckdb.wal
+!data/synthetic/**
+
+outputs/
+logs/
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+
+# SQLite databases (client data lives in PLANNERIQ_PRIVATE, outside the repo)
+*.db
+.venv/
+__pycache__/
+*.egg-info/
+
+# Kept local, not published
+ROADMAP.md
+# Evaluation outputs contain real aggregate figures from the private client book
+eval/results_*.json

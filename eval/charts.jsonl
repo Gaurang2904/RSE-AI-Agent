@@ -1,0 +1,6 @@
+{"id": "CH1", "kind": "chart", "q": "Show me a chart of clients by AUM band.", "types": ["column", "bar"], "gold_sql": "SELECT COUNT(*) FROM clients", "tol": 0.1}
+{"id": "CH2", "kind": "chart", "q": "Plot how many clients hold each product (term, health, SIP, SWP, PMS, LAS, LI savings, ULIP).", "types": ["bar", "column"], "gold_sql": "SELECT SUM(has_term_cover)+SUM(has_health_cover)+SUM(has_sip)+SUM(has_swp)+SUM(has_pms)+SUM(has_las)+SUM(has_li_premium)+SUM(has_ulip) FROM clients", "tol": 0.1}
+{"id": "CH3", "kind": "chart", "q": "Visualise how risk profiles are split across age groups.", "types": ["stacked_bar"], "gold_sql": "SELECT COUNT(*) FROM clients", "tol": 0.1}
+{"id": "CH4", "kind": "chart", "q": "Make a donut chart of clients by occupation.", "types": ["donut"], "gold_sql": "SELECT COUNT(*) FROM clients", "tol": 0.1}
+{"id": "CH5", "kind": "chart", "q": "Chart the estimated total monthly SIP amount for each AUM band.", "types": ["column", "bar"], "gold_sql": "SELECT SUM(sip_est_inr_month) FROM clients", "tol": 1}
+{"id": "CH6", "kind": "report_chart", "q": "Create an Excel report of the number of clients in each AUM band, with a column chart.", "gold_sql": "SELECT COUNT(DISTINCT aum_band) FROM clients"}
