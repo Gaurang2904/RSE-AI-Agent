@@ -111,6 +111,27 @@ def ground_literals(sql: str) -> tuple[str, list[str]]:
     return re.sub(r"'((?:[^']|'')*)'", fix, sql), fixes
 
 
+def explain_rank_filters(sql: str) -> list[str]:
+    """'age_rank >= 3' -> "age_rank >= 3 means age_group in ['46-55', '56+']"."""
+    import operator as op
+
+    ops = {">=": op.ge, ">": op.gt, "<=": op.le, "<": op.lt, "=": op.eq}
+    con = _connect()
+    try:
+        bands = pd.read_sql("SELECT column, label, rank FROM bands", con)
+    finally:
+        con.close()
+    out = []
+    for base, sym, num in re.findall(r"(\w+)_rank\s*(>=|<=|>|<|=)\s*(\d+)", sql):
+        col = next((c for c in bands.column.unique() if re.sub(r"_(band|group)$", "", c) == base), None)
+        if col is None:
+            continue
+        labs = bands[bands.column == col].sort_values("rank")
+        keep = [l for l, r in zip(labs.label, labs["rank"]) if ops[sym](r, int(num))]
+        out.append(f"{base}_rank {sym} {num} means {col} in {keep}")
+    return out
+
+
 # ---------------------------------------------------------------- band_filter
 _UNITS = {"cr": 1e7, "crore": 1e7, "crores": 1e7, "lakh": 1e5, "lakhs": 1e5, "lac": 1e5, "lacs": 1e5,
           "l": 1e5, "k": 1e3, "thousand": 1e3}
@@ -199,6 +220,9 @@ def run_sql(sql: str) -> str:
                "rows": [[round(v, 2) if isinstance(v, float) else v for v in r] for r in rows]}
         if fixes:
             out["corrected_values"] = fixes
+        meaning = explain_rank_filters(safe)
+        if meaning:   # plain-language check of every rank condition, so mismatches are visible
+            out["filter_meaning"] = meaning
         money = [j for j, c in enumerate(cols) if "inr" in c.lower()]
         if money and rows:  # pre-formatted lakhs/crores: models are unreliable at this conversion
             out["inr_formatted"] = [{cols[j]: fmt_inr(r[j]) for j in money if isinstance(r[j], (int, float))}
@@ -575,6 +599,83 @@ def _add_excel_chart(wb, ws, df: pd.DataFrame, kind: str, title: str) -> str | N
     return f"native Excel {kind} chart added"
 
 
+# ---------------------------------------------------------------- search_knowledge (RAG)
+class KnowledgeInput(BaseModel):
+    query: str = Field(description="The concept or policy question, e.g. 'why term insurance for clients with dependants'")
+
+
+@tool("search_knowledge", args_schema=KnowledgeInput)
+def search_knowledge(query: str) -> str:
+    """Search the knowledge base (product definitions, insurance FAQs, practice policies) and
+    return the most relevant passages with their source, for explaining concepts and policies."""
+    from .rag import MIN_SCORE, search
+
+    try:
+        hits = search(query, k=4)
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({"error": f"knowledge search failed: {e}. Is Ollama running with nomic-embed-text?"})
+    relevant = [h for h in hits if h["score"] >= MIN_SCORE]
+    if not relevant:
+        return json.dumps({"passages": [], "note": "No relevant passage in the knowledge base; say so rather than guessing."})
+    return json.dumps({"passages": [{"source": h["source"], "score": h["score"], "text": h["text"]} for h in relevant],
+                       "cite_as": "[Document § Section]"}, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------- CRM REST API
+_CRM = None
+
+
+def _crm():
+    global _CRM
+    if _CRM is None:
+        from .crm_client import CRMClient
+
+        _CRM = CRMClient()
+    return _CRM
+
+
+CRM_CATEGORIES = "term_cover | health_cover | sip | swp | pms | las | li_premium | ulip"
+
+
+class CRMProductsInput(BaseModel):
+    category: str | None = Field(default=None, description=f"Optional product category: {CRM_CATEGORIES}")
+
+
+@tool("crm_products", args_schema=CRMProductsInput)
+def crm_products(category: str | None = None) -> str:
+    """Fetch the active product catalogue from the CRM REST API (name, provider, minimum ticket,
+    risk level), optionally for one category. Use for 'which products could we offer ...'."""
+    from .crm_client import CRMError
+
+    try:
+        items = _crm().products(category=category)
+        return json.dumps({"source": "CRM API /v1/products", "count": len(items),
+                           "products": [p.model_dump() for p in items]}, ensure_ascii=False, default=str)
+    except CRMError as e:
+        return json.dumps({"error": str(e)})
+
+
+class CRMFollowupsInput(BaseModel):
+    status: str | None = Field(default=None, description="open | done (omit for all)")
+    category: str | None = Field(default=None, description=f"Optional product category: {CRM_CATEGORIES}")
+
+
+@tool("crm_followups", args_schema=CRMFollowupsInput)
+def crm_followups(status: str | None = None, category: str | None = None) -> str:
+    """Fetch relationship-manager follow-up tasks from the CRM REST API. Each task has client_ref,
+    which equals clients.sr_no in the local database: to combine with client data, run_sql with
+    WHERE sr_no IN (<client_refs>)."""
+    from .crm_client import CRMError
+
+    try:
+        items = _crm().followups(status=status, category=category)
+        refs = sorted({f.client_ref for f in items})
+        return json.dumps({"source": "CRM API /v1/followups", "count": len(items), "client_refs": refs,
+                           "followups": [f.model_dump(mode="json") for f in items]}, ensure_ascii=False)
+    except CRMError as e:
+        return json.dumps({"error": str(e)})
+
+
 def _col_letter(j: int) -> str:
     s, j = "", j + 1
     while j:
@@ -583,4 +684,5 @@ def _col_letter(j: int) -> str:
     return s
 
 
-TOOLS = [find_client, band_filter, run_sql, calculate, make_chart, create_excel_report]
+TOOLS = [find_client, band_filter, run_sql, calculate, search_knowledge, crm_products, crm_followups,
+         make_chart, create_excel_report]

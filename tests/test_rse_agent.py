@@ -5,7 +5,7 @@ import sqlite3
 import openpyxl
 import pytest
 
-from planneriq import guardrails as g
+from rse_agent import guardrails as g
 
 
 def make_workbook(path):
@@ -29,7 +29,7 @@ def make_workbook(path):
 
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
-    from planneriq import ingest as ing
+    from rse_agent import ingest as ing
 
     monkeypatch.setattr(ing, "PRIVATE", tmp_path)
     xlsx, dbp = tmp_path / "synthetic.xlsx", tmp_path / "clients.db"
@@ -61,7 +61,7 @@ def test_text_columns_are_case_insensitive(db):
 
 
 def test_find_client_case_order_typos(db, monkeypatch):
-    from planneriq import tools
+    from rse_agent import tools
 
     dbp, _ = db
     monkeypatch.setattr(tools, "DB_PATH", dbp)
@@ -76,7 +76,7 @@ def test_find_client_case_order_typos(db, monkeypatch):
 
 
 def test_band_filter_and_literal_grounding(db, monkeypatch):
-    from planneriq import tools
+    from rse_agent import tools
 
     dbp, _ = db
     monkeypatch.setattr(tools, "DB_PATH", dbp)
@@ -96,7 +96,7 @@ def test_band_filter_and_literal_grounding(db, monkeypatch):
 
 
 def test_chart_rules(db, monkeypatch, tmp_path):
-    from planneriq import charts, tools
+    from rse_agent import charts, tools
 
     dbp, _ = db
     monkeypatch.setattr(tools, "DB_PATH", dbp)
@@ -135,7 +135,7 @@ def test_chart_rules(db, monkeypatch, tmp_path):
 
 
 def test_wide_query_becomes_one_bar_per_column(db, monkeypatch, tmp_path):
-    from planneriq import tools
+    from rse_agent import tools
 
     dbp, _ = db
     monkeypatch.setattr(tools, "DB_PATH", dbp)
@@ -147,7 +147,7 @@ def test_wide_query_becomes_one_bar_per_column(db, monkeypatch, tmp_path):
 
 
 def test_number_verification():
-    from planneriq.verify import successful, unverified
+    from rse_agent.verify import successful, unverified
 
     src = ['{"rows": [[6, 1, 16, 3, 0]]}', "How many clients hold each product?"]
     assert unverified("Term: 12, Health: 15, SIP: 18", src) == [12.0, 15.0, 18.0]   # invented numbers
@@ -158,7 +158,7 @@ def test_number_verification():
 
 
 def test_unknown_band_is_warned(tmp_path, monkeypatch):
-    from planneriq import ingest as ing
+    from rse_agent import ingest as ing
 
     monkeypatch.setattr(ing, "PRIVATE", tmp_path)
     xlsx = tmp_path / "w.xlsx"
@@ -198,7 +198,7 @@ def test_sql_guard_and_local_only():
 
 
 def test_calculator_and_money_format():
-    from planneriq.tools import fmt_inr, safe_eval
+    from rse_agent.tools import fmt_inr, safe_eval
 
     assert safe_eval("pct(4, 18)") == pytest.approx(22.2222, rel=1e-4)
     assert safe_eval("crores(123450000)") == pytest.approx(12.345)
@@ -211,7 +211,7 @@ def test_calculator_and_money_format():
 
 
 def test_report_has_formulas(db, monkeypatch, tmp_path):
-    from planneriq import tools
+    from rse_agent import tools
 
     dbp, _ = db
     monkeypatch.setattr(tools, "DB_PATH", dbp)

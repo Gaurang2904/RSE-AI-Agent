@@ -1,11 +1,12 @@
 """Local business-analyst agent (LangGraph + Ollama) over the private client database.
 
-    from planneriq.agent import ask
+    from rse_agent.agent import ask
     ask("How many clients have no health cover?")
 """
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from typing import Annotated, TypedDict
@@ -68,6 +69,21 @@ Rules:
   numbers in words. For one bar per product use: SELECT SUM(has_term_cover) AS term_cover,
   SUM(has_health_cover) AS health_cover, SUM(has_sip) AS sip, ... FROM clients with x='product',
   y='clients'. For a split by two dimensions pass the second one as series.
+- When knowledge passages are already in the conversation (search_knowledge results), answer the
+  question directly from them in 2-5 sentences with inline citations. Never reply with commentary
+  about your process (e.g. "this does not require a query"): give the actual answer.
+- run_sql returns "filter_meaning" for every *_rank condition. Check it matches the question
+  (e.g. "aged 56+" must mean age_group in ['56+']); if not, fix the SQL and run it again.
+- search_knowledge for concepts, product explanations, FAQs and practice policy ("why", "what is",
+  "should we", "what does our policy say"). Base the explanation on the passages and cite them
+  inline as [Document § Section]. If the question is also about our clients, ALSO query the data
+  with run_sql and keep the two parts clearly separate (guidance vs. facts about our clients).
+- Explain considerations; never tell anyone to buy or sell a specific product or security, and
+  never present guidance as personalised advice.
+- crm_products / crm_followups call the CRM REST API (product catalogue, RM follow-up tasks).
+  CRM client_ref = clients.sr_no: to combine CRM tasks with client data, take client_refs from
+  crm_followups and run_sql ... WHERE sr_no IN (...). If a CRM call returns an error, report it
+  plainly (e.g. CRM unavailable) and answer only what the local data supports.
 - For Excel formula questions, give the formula and explain it briefly.
 - Answer concisely: the key number(s) first, then 1-3 sentences of insight (e.g. cross-sell gaps,
   risk-profile mismatches). Mention the client count behind percentages.
@@ -84,9 +100,20 @@ RECHECK = ("Check: these numbers in your answer do not appear in any query resul
 WARNING = ("\n\n⚠ *Some figures in this answer ({nums}) could not be verified against the data. "
            "Check the SQL below before relying on them.*")
 NUDGE = ("Check: you have not run any data query for this question yet. If the answer depends on the "
-         "client data, call run_sql now (use band_filter only for amount/age thresholds). If it is a "
-         "general question (e.g. an Excel formula), answer it directly.")
-DATA_TOOLS = {"run_sql", "create_excel_report", "make_chart"}
+         "client data, call run_sql now (use band_filter only for amount/age thresholds). If no data is "
+         "needed, reply with your final answer to the user now (the answer itself, not commentary).")
+DATA_TOOLS = {"run_sql", "create_excel_report", "make_chart", "search_knowledge", "crm_products",
+              "crm_followups"}
+# Retrieve-before-answer routing. Calibrated on the evaluation questions: every knowledge question
+# scored >= 0.79 and every pure data question <= 0.73 against the knowledge base.
+AUTO_RETRIEVE = 0.76          # inject passages whatever the phrasing
+INTENT_RETRIEVE = 0.70        # inject passages when the question is phrased as a knowledge question
+KNOWLEDGE_INTENT = re.compile(r"\b(why|explain|difference|define|definition|meaning|what (is|are|does)|"
+                              r"should|policy|policies|according to|lock-?in|minimum investment|faq)\b", re.I)
+DATA_INTENT = re.compile(r"\b(how many|count|number of|which clients|list|chart|plot|graph|total|average|"
+                         r"our clients|of ours|clients (with|aged|who|in)|report|excel)\b", re.I)
+DISCLAIMER = ("\n\nℹ️ *Educational information, not personalised financial advice. Recommendations for "
+              "a specific client require a suitability assessment by a qualified, registered adviser.*")
 
 
 class State(TypedDict):
@@ -117,6 +144,32 @@ def build_graph(model: str = MODEL):
             return {"blocked": "guardrail", "messages": [AIMessage(refusal)]}
         return {"blocked": None, "steps": 0, "nudged": False, "rechecked": False}
 
+    def retrieve(state: State):
+        """Retrieve before answering: knowledge questions get the top passages as context."""
+        from .rag import MIN_SCORE, search
+
+        q = str(state["messages"][-1].content)
+        know, data = bool(KNOWLEDGE_INTENT.search(q)), bool(DATA_INTENT.search(q))
+        try:
+            hits = search(q, k=4)
+        except Exception:  # noqa: BLE001  (no embeddings available: the model can still call tools)
+            return {}
+        top = hits[0]["score"] if hits else 0.0
+        if top >= AUTO_RETRIEVE or (know and top >= INTENT_RETRIEVE):
+            payload = {"passages": [{"source": h["source"], "score": h["score"], "text": h["text"]}
+                                    for h in hits if h["score"] >= MIN_SCORE], "cite_as": "[Document § Section]"}
+        elif know and not data:
+            payload = {"passages": [], "note": "No relevant passage in the knowledge base. If the question is "
+                                               "about our clients, use the data tools instead. If it is a general "
+                                               "knowledge question, say the knowledge base does not cover it and do "
+                                               "not answer from general knowledge."}
+        else:
+            return {}
+        call = {"name": "search_knowledge", "args": {"query": q}, "id": "auto_retrieve", "type": "tool_call"}
+        return {"messages": [AIMessage(content="", tool_calls=[call]),
+                             ToolMessage(json.dumps(payload, ensure_ascii=False), tool_call_id="auto_retrieve",
+                                         name="search_knowledge")]}
+
     def agent(state: State):
         resp = llm_tools.invoke([SystemMessage(system), *state["messages"]])
         return {"messages": [resp], "steps": state.get("steps", 0) + 1}
@@ -128,10 +181,14 @@ def build_graph(model: str = MODEL):
         return max(i for i, m in enumerate(msgs) if isinstance(m, HumanMessage) and m.name != "nudge")
 
     def grounded(state: State) -> bool:
-        """Did a data tool run SUCCESSFULLY since the user's latest question?"""
+        """Did a data tool run SUCCESSFULLY since the user's latest question? A question that asks
+        about our clients ("how many of ours ...") needs a client-data query, not just knowledge."""
         msgs = state["messages"]
-        return any(isinstance(m, ToolMessage) and m.name in DATA_TOOLS and successful(m.content)
-                   for m in msgs[question_start(msgs):])
+        start = question_start(msgs)
+        ok = {m.name for m in msgs[start:] if isinstance(m, ToolMessage) and successful(m.content)}
+        if DATA_INTENT.search(str(msgs[start].content)):
+            return bool(ok & (DATA_TOOLS - {"search_knowledge"}))
+        return bool(ok & DATA_TOOLS)
 
     def check_numbers(state: State) -> list[float]:
         msgs = state["messages"]
@@ -140,11 +197,30 @@ def build_graph(model: str = MODEL):
         return unverified(str(msgs[-1].content), sources)
 
     def output_guard(state: State):
-        last = state["messages"][-1]
+        msgs = state["messages"]
+        last = msgs[-1]
+        # After a reminder, a reply without any tool call just confirms the earlier answer: keep that
+        # earlier answer rather than the confirmation text.
+        # (Only for the grounding reminder; after a number recheck the new answer is the corrected one.)
+        confirmed_after_nudge = (
+            len(msgs) >= 3 and isinstance(msgs[-2], HumanMessage) and msgs[-2].content == NUDGE
+            and isinstance(msgs[-3], AIMessage) and bool(msgs[-3].content) and not msgs[-3].tool_calls)
+        if confirmed_after_nudge:
+            last = msgs[-3]
         text = mask_pii(str(last.content))
         bad = check_numbers(state)
         if bad:                       # still unverified after the recheck: say so visibly
             text += WARNING.format(nums=fmt(bad))
+        msgs = state["messages"]
+        sources = []
+        for m in msgs[question_start(msgs):]:
+            if isinstance(m, ToolMessage) and m.name == "search_knowledge" and successful(m.content):
+                sources += [p_["source"] for p_ in json.loads(m.content).get("passages", [])]
+        sources = list(dict.fromkeys(sources))[:4]
+        if sources:                   # deterministic citations: the passages the answer was grounded on
+            text += "\n\n**Sources (knowledge base):** " + "; ".join(sources)
+            if "not personalised financial advice" not in text:
+                text += DISCLAIMER    # guidance answers always carry the education-vs-advice notice
         return {"messages": [AIMessage(text, id=last.id, usage_metadata=getattr(last, "usage_metadata", None))]}
 
     def route(state: State):
@@ -166,6 +242,7 @@ def build_graph(model: str = MODEL):
 
     g = StateGraph(State)
     g.add_node("input_guard", input_guard)
+    g.add_node("retrieve", retrieve)
     g.add_node("agent", agent)
     g.add_node("tools", ToolNode(TOOLS))
     g.add_node("finalize", finalize)
@@ -173,7 +250,8 @@ def build_graph(model: str = MODEL):
     g.add_node("recheck", recheck)
     g.add_node("output_guard", output_guard)
     g.add_edge(START, "input_guard")
-    g.add_conditional_edges("input_guard", lambda s: END if s.get("blocked") else "agent", ["agent", END])
+    g.add_conditional_edges("input_guard", lambda s: END if s.get("blocked") else "retrieve", ["retrieve", END])
+    g.add_edge("retrieve", "agent")
     g.add_conditional_edges("agent", route, ["tools", "finalize", "nudge", "recheck", "output_guard"])
     g.add_edge("nudge", "agent")
     g.add_edge("recheck", "agent")

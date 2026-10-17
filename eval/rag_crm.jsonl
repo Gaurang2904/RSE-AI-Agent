@@ -1,0 +1,13 @@
+{"id": "RG1", "kind": "rag", "q": "Why might a client with dependants need term insurance?", "keywords": [["income"], ["dependant", "family"]]}
+{"id": "RG2", "kind": "rag", "q": "What is the lock-in period for a ULIP?", "keywords": [["five years", "5 years", "5-year", "five-year"]]}
+{"id": "RG3", "kind": "rag", "q": "What is the minimum investment required for PMS?", "keywords": [["50 lakh"]]}
+{"id": "RG4", "kind": "rag", "q": "According to our practice policy, when must a client review be scheduled immediately?", "keywords": [["56"], ["dependant"]]}
+{"id": "RG5", "kind": "rag", "q": "Explain the difference between a SIP and an SWP.", "keywords": [["withdraw"], ["invest"]]}
+{"id": "RG6", "kind": "rag_none", "q": "What is the current repo rate set by the RBI?"}
+{"id": "RN1", "kind": "rag_number", "q": "Why might clients with dependants need term insurance, and how many of our clients with dependants do not have it?", "keywords": [["income", "dependant"]], "gold_sql": "SELECT COUNT(*) FROM clients WHERE dependants > 0 AND has_term_cover = 0", "tol": 0.1}
+{"id": "RN2", "kind": "rag_number", "q": "What does our suitability policy say about clients aged 56+ with a moderately aggressive or aggressive risk profile, and how many such clients do we have?", "keywords": [["review"]], "gold_sql": "SELECT COUNT(*) FROM clients WHERE age_group = '56+' AND risk_profile_rank >= 3", "tol": 0.1}
+{"id": "CR1", "kind": "crm_number", "q": "How many open follow-up tasks are there in the CRM?", "crm_gold": "open_followups", "tol": 0.1}
+{"id": "CR2", "kind": "crm_number", "q": "How many active health insurance products are in the CRM catalogue?", "crm_gold": "active_health_products", "tol": 0.1}
+{"id": "CR3", "kind": "crm_join", "q": "Which clients have an open term insurance follow-up in the CRM but no term cover in our data?", "category": "term_cover", "flag": "has_term_cover"}
+{"id": "CR4", "kind": "crm_join", "q": "Which clients have an open health insurance follow-up in the CRM but no health cover?", "category": "health_cover", "flag": "has_health_cover"}
+{"id": "CR5", "kind": "crm_products", "q": "List the active health insurance products in the CRM with their providers.", "category": "health_cover"}

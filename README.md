@@ -1,137 +1,130 @@
-# RSE AI Agent: Private Client Analytics Agent for Financial Planners
+# RSE AI Agent
 
-Ask business questions about your clients in plain English, for example:
-- *"How many clients with dependants have no term insurance?"*
-- *"Create an Excel report of clients without health cover"*
+**A private, local AI business-analyst agent for a financial-planning practice.**
 
-You get answers and real Excel reports from your own client workbook. **Everything runs on your computer**: a local Qwen3 8B model through Ollama, and a private SQLite file outside this repo. Client data never goes to a cloud AI service.
+Ask questions in plain English and get grounded answers, charts and Excel reports. The agent works over three sources:
+- your **client workbook** (text-to-SQL)
+- a **knowledge base** of product definitions, insurance FAQs and practice policies (RAG with citations)
+- a **CRM REST API** (authenticated, paginated, with retries)
 
-## What it does
+Everything runs on your own computer: LangGraph and a local Qwen3 8B model through Ollama. Client data never goes to a cloud AI service.
+
+> *"Why might clients with dependants need term insurance, and how many of ours lack it?"* → a cited explanation from the knowledge base, **plus** the exact count from the client data, plus an education-not-advice notice.
+>
+> *"Which clients have an open health-insurance follow-up in the CRM but no health cover?"* → calls the CRM API, then joins its results with the local client data.
+
+## Capabilities
+
 | Capability | How |
 |---|---|
-| Ask questions of an Excel workbook (text-to-SQL) | LangGraph agent writes read-only SQL over the loaded data; every answer shows its SQL |
-| Look up a client by name | `find_client`: any case, word order or small typo ("ravi sharma", "Sharma Ravi", "ravi sharm") |
-| Business analytics | Counts, percentages, cross-sell gaps (term/health), risk-profile checks, estimated AUM / SIP book |
-| Charts for analysis | `make_chart`: bar, column, stacked bar, donut or line. Shown **interactively (hover tooltips)** in the app, light or dark, with a table view and a PNG download |
-| Generate Excel reports | `create_excel_report`: formatted table, live `SUM` formulas, filters, an "About" sheet with the query, and optionally a **native, editable Excel chart** |
-| Excel formula help | Writes and explains formulas (e.g. `COUNTIF`) |
-| Messy workbooks | Finds the real header row under merged group titles; dropdown **bands** become a rank plus an estimated ₹ value |
+| **Text-to-SQL analytics** over an Excel workbook | Read-only SQL over a private SQLite file built from the workbook. Every answer shows its SQL |
+| **RAG with citations** | Retrieve-before-answer over `knowledge/*.md`: `nomic-embed-text` embeddings (local Ollama) and a **FAISS** index. Answers cite `[Document § Section]` and list their sources |
+| **REST API integration** | `crm_client.py`: bearer-token auth, timeouts, exponential-backoff retries, `Retry-After` handling for 429, pagination, **Pydantic** response validation, typed errors. `mock_crm.py` is a FastAPI CRM with synthetic data and simulated rate limits, outages, slow responses and schema drift |
+| **Multi-step tool use** | One answer can combine CRM data, client data and knowledge passages, e.g. CRM follow-ups joined with local client records |
+| **Charts** | Bar, column, stacked bar, donut and line, shown interactively (hover) in the app and saved as PNG, with design rules enforced in code |
+| **Excel reports** | Formatted `.xlsx` with live `SUM` formulas, filters, a query "About" sheet, and an optional native Excel chart |
+| **Client lookup** | Any case, word order or small typo ("ravi sharma", "Sharma Ravi", "ravi sharm") |
+| **Guardrails** | Read-only data; blocks data changes, sending data elsewhere and prompt injection; local model only; masks personal data |
+| **Answer verification** | Every number must appear in a tool result. Unverified numbers trigger a re-query, then a visible ⚠ warning |
+| **Education vs advice** | Guidance answers always carry a notice that they are educational, not personalised financial advice |
 
-## Answer verification (no invented numbers)
-Before an answer is shown, [verify.py](src/planneriq/verify.py) extracts every number in it and checks it against the successful tool results, the user's question and the band labels, allowing for rounding.
-- **If a number isn't found,** the agent is told which numbers are unverified and gets one chance to re-query or use `calculate`.
-- **If it's still unverified after that,** the answer is shown with a visible ⚠ warning naming those numbers.
+## How a question flows
 
-**Limitation:** this checks that each number exists in the data, not that it's paired with the right label. The SQL panel under every answer is how you check that.
+```
+question ─► input guard ─► retrieve (RAG: knowledge passages if the question needs them)
+                               │
+                               ▼
+                      agent (Qwen3 8B) ⇄ tools: run_sql · band_filter · find_client · calculate
+                               │               search_knowledge · crm_products · crm_followups
+                               │               make_chart · create_excel_report
+                               ▼
+          grounding check ─► number verification ─► output guard (PII mask, sources, advice notice)
+```
 
-## Privacy by design
-- **Local model only.** `assert_local()` refuses any model host that isn't localhost.
-- **Data outside the repo.** The database, logs and reports live in `PLANNERIQ_PRIVATE` (default `%USERPROFILE%\PlannerIQ_private`). The original workbook is opened read-only, and `.gitignore` blocks `*.xlsx`, `*.csv` and `*.db`.
-- **Contact data is never loaded.** Contact columns (phone, email, PAN, Aadhaar, address) are dropped at ingestion.
-- **Guardrails** run before the model sees a request:
-  - data changes are refused (read-only connection plus a SQL check)
-  - sending or sharing data off the machine is refused ("email it to…", "share with…", Google Sheets / OneDrive …)
-  - prompt-injection attempts are refused
-- **Minimal logging.** The audit log stores only the question, SQL and timing, never result rows. Streamlit telemetry is off, and the app binds to localhost.
+## Project structure
 
-## Results (real 18-client workbook, Qwen3 8B fully on the RTX 5060 GPU)
+```
+rse-ai-agent/
+├── src/rse_agent/
+│   ├── config.py          Settings: private data folder (RSE_PRIVATE), model, knowledge folder, excluded columns
+│   ├── ingest.py          Excel workbook → private SQLite: finds headers under merged titles, adds band
+│   │                      rank / ₹ estimate / has_<product> columns, never loads contact columns
+│   ├── tools.py           The agent's tools: run_sql, band_filter, find_client, calculate,
+│   │                      search_knowledge (RAG), crm_products / crm_followups (REST), make_chart,
+│   │                      create_excel_report
+│   ├── agent.py           LangGraph flow: input guard → retrieve → agent ⇄ tools → grounding check →
+│   │                      number verification → output guard; local audit log
+│   ├── rag.py             Knowledge base: section chunking, Ollama embeddings, FAISS index, search
+│   ├── crm_client.py      REST client: auth, timeouts, retries/backoff, 429 Retry-After, pagination,
+│   │                      Pydantic validation, typed errors
+│   ├── mock_crm.py        Mock CRM REST API (FastAPI, synthetic data, simulated faults)
+│   ├── guardrails.py      Request screening, read-only SQL check, PII masking, local-model enforcement
+│   ├── verify.py          Number verification of final answers
+│   ├── charts.py          Chart specs and design rules (palette, marks, forms, light/dark), PNG export
+│   └── evaluate.py        Evaluation runner; gold answers computed from the data at run time
+├── knowledge/             Knowledge base (original educational articles + two synthetic practice policies)
+├── configs/bands.yaml     Band definitions: order, ₹ ranges, which columns are products
+├── app/streamlit_app.py   Local chat UI: SQL / sources / API panels, interactive charts, downloads;
+│                          starts the mock CRM automatically
+├── eval/*.jsonl           Evaluation questions (analytics, held-out sets, charts, RAG + CRM)
+├── tests/                 Unit and integration tests (synthetic data only)
+└── .streamlit/config.toml Telemetry off, bound to localhost
+```
 
-**Final version**
-| Question set | Accuracy | Mean latency |
+## Results
+
+Measured on a real 18-client workbook with Qwen3 8B fully on an RTX 5060 Laptop GPU. Gold answers are computed from the data at evaluation time, and no client data is stored in this repo.
+
+| Evaluation set | Questions | Accuracy |
 |---|---|---|
-| Development set (38: numbers, client lists, reports, formula, attacks, name lookups) | 97% (37/38) | 2.1 s |
-| Held-out set 1 (14) | 86% (12/14) | 2.6 s |
-| Held-out set 2 (8) | 100% | 2.6 s |
-| **Held-out set 3 (8, blind: written before the final version was run)** | **100%** | 2.4 s |
-| **All 68 questions** | **96% (65/68)** | ~2.4 s |
+| RAG + CRM (knowledge answers with citations, combined RAG + data, CRM counts / joins / catalogue, out-of-scope refusal) | 13 | **100%** |
+| Analytics (numbers, client lists, reports, formula, attacks, name lookups) | 38 | **100%** |
+| Charts (right type, data sums to gold, native chart in report) | 6 | **100%** |
+| Held-out set written before the final version | 8 | 88% |
+| **Total** | **65** | **98%** |
 
-**Blind first-run scores along the way:**
-- held-out 1: 83% (before the guardrail fix)
-- held-out 2: 75% (when the agent over-used `band_filter`)
-- held-out 3: 100% (final)
+Retrieval: the top passage was the correct section for every knowledge question tested (cosine similarity 0.79–0.90).
 
-**The remaining misses are borderline:**
-- "more than 8 years" versus the band "8 to 12 years" (ambiguous)
-- "between 46 and 55", which is an exact band but was treated as a threshold
-- a two-part question where only one number was given
-
-**What made it reliable (each fix came from a real failure):**
-| Failure seen | Fix |
-|---|---|
-| A lower-case name (`ravi sharma`) didn't match the stored `RAVI SHARMA` | Text columns are stored `COLLATE NOCASE`. The new `find_client` tool does fuzzy matching that ignores case, word order and typos (e.g. "sharma ravi", "ravi sharm") |
-| Label typed with different spacing (`'50.1k to 1lac'` vs stored `'50.1k to 1 lac'`) | `run_sql` auto-corrects quoted values that match a real label apart from case or spacing, and reports the correction |
-| Wrong band thresholds ("1 crore or more" read as only the top band) | Deterministic `band_filter` tool: Indian amounts ("1 crore", "50k", "8 lakh") are parsed in code into an exact `_rank` condition |
-| ₹ → crore conversion off by 10× | `run_sql` returns ₹ values pre-formatted in lakhs/crores |
-| Answering a single client's open-ended band with its lower bound | Rule: for one client, quote the band label ("'1lac and above' = ₹1 lakh or more"); use estimates only for totals |
-| Answering without querying the data | Grounding check in the graph: one reminder to run `run_sql` if no data tool was used |
-| "What *share* of clients…" blocked; "share it with my team" not blocked | Rewritten exfiltration rule, checked against all questions |
-| Model partly on CPU (20%) at a 16K context | 8K context: 100% on GPU, about 4× faster |
-| Chart never appeared in the app | The "SQL used" panel crashed on chart results (different shape) and aborted the page. Charts now render first, and the panel handles every result shape and error |
-| "How many clients hold each product" chart failed: the model queried one row per client with 8 flag columns | `make_chart` turns such "wide" results into one bar per column (weighting flags by a count column if present) |
-| A second category was silently dropped (risk profile × age drawn as a plain bar) | Two category columns automatically give a stacked bar |
-| **After the chart failed, the model answered with invented numbers** | (1) The grounding check counts only *successful* data queries. (2) **Number verification:** every number in the final answer must appear in a query result, the question or the band labels. If not, the agent is told which numbers are unverified and re-queries once; anything still unverified gets a visible ⚠ warning |
-
-Gold answers are computed from the private database at evaluation time. Name-lookup questions are built at run time from a row number (lower-cased, reversed or misspelled), so no client data is stored in this repo ([eval/](eval/)).
-
-## Charts
-Ask things like *"show a chart of clients by AUM band"*, *"visualise risk profiles across age groups"* or *"donut of clients by occupation"*.
-
-- **One source of truth.** A Vega-Lite spec (built with Altair) renders interactively in the app and to PNG **offline** (`vl-convert`), so nothing is sent anywhere.
-- **Design rules enforced in code** ([src/planneriq/charts.py](src/planneriq/charts.py)), not left to the model:
-  - **Form:** bar for categories, column for ordered bands, stacked bar for two dimensions, donut only for share-of-whole with 3–6 parts (2 parts → bar), line for ordered sequences.
-  - **One measure per chart:** never a second y-axis.
-  - **Band order:** banded categories stay in natural order (AUM, age, SIP …), and **empty bands are shown as 0** so the distribution's shape is honest.
-  - **Color:** a validated categorical palette, run through the colour-blindness validator in light and dark mode. One series gets one color. Series colors **follow the entity** (e.g. "Moderately Aggressive" is always the same color). More than 8 series (6 for donut) fold into "Other".
-  - **Marks:** bars at most 24 px with a 4 px rounded end, 2 px surface gaps, values at bar tips in ink (never series colors), hairline solid gridlines.
-  - **Units:** rupee axes in ₹ lakh / ₹ crore.
-  - **Readable without hover:** the donut legend carries the numbers, and every chart has a table view.
-- Charts are saved to `PlannerIQ_private/outputs/charts/` (record + PNG).
-
-**Chart evaluation** (6 requests, first run): **6/6**. Each check covers the right chart type, chart data that sums to the gold total from the database, and a native chart present in the Excel report. One layout bug was found by looking at the agent's own output: horizontal-bar labels were centred and clipped. It was fixed and re-checked in both light and dark mode.
+**What changed along the way (each fix came from a measured failure):**
+- **The model skipped retrieval and answered from memory.** Fix: *retrieve before answering*. Questions phrased as knowledge questions, or scoring ≥ 0.76 against the knowledge base, get passages first; pure data questions don't.
+- **Inconsistent citations.** Fix: a deterministic *Sources* footer built from the retrieved passages.
+- **Combined questions stopped after the explanation.** Fix: when a question asks about "our clients", the grounding check requires a real data query.
+- **Wrong rank filters.** Fix: `run_sql` explains each rank condition in labels (`age_rank >= 3` → `['46-55', '56+']`) so the model can see a mismatch and correct it.
+- **Earlier fixes** (from the analytics stage): case-insensitive and fuzzy name lookup, band-threshold helper, lakh/crore formatting, and number verification after a chart failure once led to invented figures.
 
 ## Quick start
+
 ```powershell
-# one time
-ollama pull qwen3:8b
+ollama pull qwen3:8b; ollama pull nomic-embed-text
 python -m venv .venv; .venv\Scripts\activate
 pip install -e ".[dev]"
 
-# load a workbook (any time it changes)
-python -m planneriq.ingest "path\to\client_workbook.xlsx"
+python -m rse_agent.ingest "path\to\client_workbook.xlsx"   # build the private database
+python -m rse_agent.rag build                               # build the knowledge index (auto-rebuilds on change)
+streamlit run app/streamlit_app.py                          # http://localhost:8501 (starts the mock CRM too)
 
-# chat UI  ->  http://localhost:8501
-streamlit run app/streamlit_app.py
-
-# evaluate / test
-python -m planneriq.evaluate                       # 35 dev questions
-python -m planneriq.evaluate --questions holdout3.jsonl   # also holdout.jsonl, holdout2.jsonl
-python -m planneriq.evaluate --questions charts.jsonl
-pytest                                             # synthetic data only
+python -m rse_agent.mock_crm                                # or run the CRM API on its own (port 8765)
+python -m rse_agent.evaluate --questions rag_crm.jsonl      # also questions / holdout* / charts
+pytest
 ```
 
-## How the banded data works
-Most columns in the workbook are dropdown bands, such as AUM `1 cr - 5 cr` or SIP `25.1 k to 50k`. [configs/bands.yaml](configs/bands.yaml) defines each band's order and ₹ range. Ingestion stores three things for each banded column:
-- `<x>_band`: the original label
-- `<x>_rank`: its order, for questions like "AUM of 50 lakhs or more" (`aum_rank >= 3`)
-- `<x>_est_inr…`: the band midpoint, for totals (always reported as an *estimate*)
+| Environment variable | Default | Purpose |
+|---|---|---|
+| `RSE_PRIVATE` | `%USERPROFILE%\RSE_AI_Agent_private` | Database, knowledge index, reports, charts, logs (outside the repo) |
+| `RSE_MODEL` | `qwen3:8b` | Local chat model |
+| `RSE_CRM_URL` / `RSE_CRM_TOKEN` | `http://127.0.0.1:8765` / `demo-token` | CRM endpoint and bearer token |
+| `RSE_CRM_RATE_LIMIT`, `RSE_CRM_FAIL_EVERY`, `RSE_CRM_SLOW_EVERY`, `RSE_CRM_MALFORMED` | off | Mock CRM fault simulation |
 
-It also adds `has_<product>` flags for products. To support a new column or a new band, edit `bands.yaml` and re-run ingest; ingest warns about any value it doesn't recognise.
+## Privacy and responsible use
+- **Local model only:** `assert_local()` refuses any model host that isn't localhost, and embeddings are also computed locally.
+- **No client data in this repository:** the workbook, database, index, reports and logs live in `RSE_PRIVATE`. Contact columns are never loaded.
+- **The CRM receives only filters and row references,** never names or personal data.
+- **Guidance is educational.** The knowledge base and answers explain concepts and policies. Personalised investment advice in India is regulated (SEBI for investments, IRDAI for insurance), and recommendations for a specific client require a suitability assessment by a qualified, registered adviser.
+- **Use client data responsibly under the DPDP Act 2023:** for the practice's own purposes, with consent, on an encrypted drive, deleting working copies when no longer needed.
 
-## Project layout
-```
-configs/bands.yaml        band definitions (order, ₹ ranges, which columns are products)
-src/planneriq/ingest.py   workbook -> private SQLite (header detection, bands, PII exclusion)
-src/planneriq/tools.py    find_client, band_filter, run_sql, calculate, make_chart, create_excel_report
-src/planneriq/charts.py   chart specs + design rules (palette, marks, forms), PNG export
-src/planneriq/agent.py    LangGraph agent (input guard -> agent <-> tools -> output guard)
-src/planneriq/guardrails.py
-app/streamlit_app.py      local chat UI with SQL transparency and report downloads
-eval/                     question sets (gold = SQL), aggregate results only
-tests/                    synthetic-data tests
-```
-
-## Limitations and next steps
-- Tested on one 18-client sheet. Larger books, multiple sheets (e.g. transactions, policies) and joins need more testing.
-- Band midpoints are rough. Exact amounts (where available) would make totals precise.
-- The agent sees client **names** locally to answer "which clients…" questions. That's fine on this machine, but never switch the model to a cloud provider for real data.
-- **DPDP Act 2023:** use the data only for the practice's own analysis, with the data owner's consent. Keep `PlannerIQ_private` on an encrypted drive and delete copies you no longer need.
+## Limitations
+- Tested on one 18-client sheet. Larger books and multi-sheet joins need more testing.
+- Band midpoints are estimates.
+- The knowledge base is small (9 articles) and written for education. It is not a regulatory reference.
+- The retrieval routing thresholds were calibrated on the evaluation questions and should be re-checked as the knowledge base grows.
+- Number verification checks that each number exists in the data, not that it is paired with the right label. The SQL / sources panels are the final check.

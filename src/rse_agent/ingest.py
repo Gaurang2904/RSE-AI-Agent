@@ -1,8 +1,8 @@
 """Load a client workbook (merged multi-row headers, dropdown bands) into a private SQLite DB.
 
-    python -m planneriq.ingest "path/to/client_workbook.xlsx"
+    python -m rse_agent.ingest "path/to/client_workbook.xlsx"
 
-Creates three tables in PLANNERIQ_PRIVATE/clients.db:
+Creates three tables in RSE_PRIVATE/clients.db:
   clients  - one row per client: the original band labels plus, for banded columns,
              <base>_rank (order of the band) and <base>_est_<unit> (band midpoint estimate),
              and has_<product> flags (1 if the client holds the product)

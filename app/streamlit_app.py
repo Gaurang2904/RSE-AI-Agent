@@ -3,7 +3,7 @@
     .venv\\Scripts\\streamlit run app/streamlit_app.py
 
 Everything runs on this computer: the workbook is loaded into a private SQLite file
-(PLANNERIQ_PRIVATE) and questions are answered by a local Ollama model.
+(RSE_PRIVATE) and questions are answered by a local Ollama model.
 """
 import json
 import sqlite3
@@ -12,11 +12,22 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from planneriq.charts import build_spec
-from planneriq.config import DB_PATH, MODEL, PRIVATE
-from planneriq.ingest import ingest
+from rse_agent.charts import build_spec
+from rse_agent.config import DB_PATH, MODEL, PRIVATE
+from rse_agent.ingest import ingest
 
 st.set_page_config(page_title="RSE AI Agent", page_icon="📊", layout="wide")
+
+
+@st.cache_resource
+def start_crm() -> bool:
+    """Demo convenience: run the mock CRM REST API in the background if it is not already up."""
+    from rse_agent.mock_crm import ensure_running
+
+    return ensure_running()
+
+
+CRM_UP = start_crm()
 
 def theme_mode() -> str:
     try:
@@ -46,7 +57,26 @@ def show_tool_call(c: dict) -> None:
         res = json.loads(c["result"])
     except (json.JSONDecodeError, TypeError):
         res = {}
-    label = "⚠ failed" if isinstance(res, dict) and "error" in res else "SQL used"
+    failed = isinstance(res, dict) and "error" in res
+    if c["name"] == "search_knowledge":
+        with st.expander("📚 search_knowledge: " + ("⚠ failed" if failed else "sources used")):
+            st.caption(f"query: {c['args'].get('query', '')}")
+            for p in (res.get("passages", []) if isinstance(res, dict) else []):
+                st.markdown(f"**{p['source']}** (similarity {p['score']})  \n{p['text']}")
+            if failed:
+                st.caption(res["error"])
+        return
+    if c["name"] in ("crm_products", "crm_followups"):
+        with st.expander(f"🌐 {c['name']}: " + ("⚠ failed" if failed else "CRM API call")):
+            st.caption(f"filters: {c['args']}")
+            if failed:
+                st.caption(res["error"])
+            elif isinstance(res, dict):
+                rows = res.get("products") or res.get("followups") or []
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        return
+    label = "⚠ failed" if failed else "SQL used"
     with st.expander(f"🔎 {c['name']}: {label}"):
         st.code(c["args"].get("sql", ""), language="sql")
         if not isinstance(res, dict):
@@ -63,12 +93,15 @@ EXAMPLES = [
     "Give me a cross-sell summary: how many clients are missing term and health insurance?",
     "Which clients aged 56+ have a moderately aggressive or aggressive risk profile?",
     "Show a chart of how many clients hold each product.",
+    "Why might clients with dependants need term insurance, and how many of ours lack it?",
+    "Which clients have an open health-insurance follow-up in the CRM but no health cover?",
     "Create an Excel report of clients without health cover with age group, AUM band and risk profile.",
 ]
 
 with st.sidebar:
     st.header("Data")
     st.caption(f"🔒 Local only · model `{MODEL}` via Ollama · data folder `{PRIVATE}`")
+    st.caption(("🟢" if CRM_UP else "🔴") + " CRM API (mock) · 📚 knowledge base: knowledge/*.md")
     up = st.file_uploader("Load a client workbook (.xlsx)", type=["xlsx"])
     if up is not None and st.button("Load workbook"):
         dest = PRIVATE / "uploads" / Path(up.name).name
@@ -119,7 +152,7 @@ for turn in st.session_state.history:
 
 prompt = st.chat_input("e.g. How many clients with dependants have no term insurance?") or clicked
 if prompt:
-    from planneriq.agent import ask
+    from rse_agent.agent import ask
 
     st.session_state.history.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -131,7 +164,8 @@ if prompt:
         for i, path in enumerate(r.get("charts", [])):      # charts first: they are the point
             show_chart(path, key=f"new-{i}")
         for c in r["tool_calls"]:
-            if c["name"] in ("run_sql", "create_excel_report", "make_chart"):
+            if c["name"] in ("run_sql", "create_excel_report", "make_chart", "search_knowledge",
+                             "crm_products", "crm_followups"):
                 show_tool_call(c)
         for path in r["reports"]:
             st.download_button(f"⬇ Download {Path(path).name}", Path(path).read_bytes(), file_name=Path(path).name)

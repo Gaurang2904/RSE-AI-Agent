@@ -1,5 +1,5 @@
 # --- PRIVACY: client data must never be committed ---
-# Real client files live OUTSIDE this repo (e.g. D:\PlannerIQ_private\).
+# Real client files live OUTSIDE this repo (e.g. D:\RSE_AI_Agent_private\).
 # Only generated synthetic demo data in data/synthetic/ may be committed.
 *.xlsx
 *.xlsm
@@ -26,7 +26,7 @@ Thumbs.db
 .DS_Store
 .vscode/
 
-# SQLite databases (client data lives in PLANNERIQ_PRIVATE, outside the repo)
+# SQLite databases (client data lives in RSE_PRIVATE, outside the repo)
 *.db
 .venv/
 __pycache__/

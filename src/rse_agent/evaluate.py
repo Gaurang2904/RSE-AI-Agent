@@ -2,7 +2,7 @@
 run time, so no client data is stored in the repo. Prints only pass/fail and aggregate scores
 (never client names).
 
-    python -m planneriq.evaluate [--model qwen3:8b]
+    python -m rse_agent.evaluate [--model qwen3:8b]
 """
 from __future__ import annotations
 
@@ -72,8 +72,59 @@ def build_question(item: dict) -> str:
     return item["template"].format(name=name_variant(row["name"], item["variant"]))
 
 
+def _crm_gold(name: str) -> float:
+    from .mock_crm import FOLLOWUPS, PRODUCTS
+
+    return float({"open_followups": sum(f["status"] == "open" for f in FOLLOWUPS),
+                  "active_health_products": sum(p["category"] == "health_cover" and p["active"] for p in PRODUCTS),
+                  }[name])
+
+
+def _keywords_ok(ans: str, groups: list[list[str]]) -> bool:
+    low = ans.lower()
+    return all(any(k.lower() in low for k in g) for g in groups)
+
+
+def _rag_ok(item: dict, r: dict) -> tuple[bool, str]:
+    used = any(c["name"] == "search_knowledge" for c in r["tool_calls"])
+    ans = r["answer"]
+    cited = "§" in ans
+    notice = "not personalised financial advice" in ans
+    kw = _keywords_ok(ans, item.get("keywords", []))
+    return used and cited and notice and kw, f"searched={used} cited={cited} notice={notice} facts={kw}"
+
+
 def check(item: dict, r: dict, before: str) -> tuple[bool, str]:
     kind, ans = item["kind"], r["answer"]
+    if kind == "rag":
+        return _rag_ok(item, r)
+    if kind == "rag_none":
+        declined = bool(re.search(r"(not (in|available|cover|covered|found|include)|no (relevant|information)|does not contain|"
+                                  r"doesn't contain|couldn't find|could not find|don't have)", ans, re.I))
+        no_number = not re.search(r"\d+(\.\d+)?\s*%", ans)
+        return declined and no_number, f"declined={declined} no_invented_rate={no_number}"
+    if kind == "rag_number":
+        ok_rag, d = _rag_ok(item, r)
+        g = float(gold(item["gold_sql"])[0][0])
+        return ok_rag and has_value(ans, g, item["tol"]), f"{d} gold={g:.0f} found={has_value(ans, g, item['tol'])}"
+    if kind == "crm_number":
+        g = _crm_gold(item["crm_gold"])
+        used = any(c["name"].startswith("crm_") for c in r["tool_calls"])
+        return used and has_value(ans, g, item["tol"]), f"crm_called={used} gold={g:.0f}"
+    if kind == "crm_join":
+        from .mock_crm import FOLLOWUPS
+
+        refs = sorted({f["client_ref"] for f in FOLLOWUPS if f["status"] == "open" and f["product_category"] == item["category"]})
+        names = [row[0] for row in gold(f"SELECT name FROM clients WHERE {item['flag']} = 0 AND sr_no IN ({','.join(map(str, refs))})")]
+        found = sum(n.lower() in ans.lower() for n in names)
+        tools = [c["name"] for c in r["tool_calls"]]
+        return found == len(names) and "crm_followups" in tools, f"names found {found}/{len(names)}"
+    if kind == "crm_products":
+        from .mock_crm import PRODUCTS
+
+        names = [p["name"] for p in PRODUCTS if p["category"] == item["category"] and p["active"]]
+        found = sum(n.lower() in ans.lower() for n in names)
+        return found == len(names), f"products found {found}/{len(names)}"
     if kind == "lookup":
         row = lookup_row(item)
         found = [str(row[f]).lower() in ans.lower() or (str(row[f]) == "0" and NOT_HELD.search(ans))
@@ -131,6 +182,10 @@ def main() -> None:
     ap.add_argument("--questions", default="questions.jsonl", help="file in eval/")
     args = ap.parse_args()
     items = [json.loads(l) for l in (ROOT / "eval" / args.questions).read_text(encoding="utf-8").splitlines() if l.strip()]
+    if any(it["kind"].startswith("crm") for it in items):
+        from .mock_crm import ensure_running
+
+        ensure_running()
     args.tag = (Path(args.questions).stem + ("_" + args.tag if args.tag else ""))
     rows = []
     for it in items:

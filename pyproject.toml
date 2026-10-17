@@ -3,12 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "planneriq"
+name = "rse-ai-agent"
 version = "0.1.0"
 description = "RSE AI Agent: private, local business-analyst agent for financial-planning client workbooks"
 requires-python = ">=3.11"
 dependencies = ["langgraph", "langchain-core", "langchain-ollama", "pandas", "openpyxl", "altair", "vl-convert-python",
-                "xlsxwriter", "pyyaml", "pydantic", "streamlit"]
+                "xlsxwriter", "pyyaml", "pydantic", "streamlit", "faiss-cpu", "numpy", "httpx",
+                "fastapi", "uvicorn"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
